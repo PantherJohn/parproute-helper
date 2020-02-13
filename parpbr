@@ -1,0 +1,103 @@
+#!/bin/bash
+
+declare enabled=true af="-4" sintf dintf
+
+function ifaddr() {
+    local level sel
+    local opts='-br' intf state
+    local ipaddr mask
+    local macaddr props
+
+    function explode() { echo $@; }
+    function propset() {
+        local arg warg narg
+
+        function contains() {
+            local target="$1"; shift; local list="$@"
+            for e in ${list}; do
+                [ "$e" == "${target}" ] && return 0
+            done; return 1
+        }
+
+        while (( $# > 0 )); do
+            arg="$1"
+            if contains ${arg} "${warg}"; then
+                shift; eval ${arg}="$1"
+            elif contains ${arg} "${narg}"; then
+                eval ${arg}=true
+            fi; shift
+        done
+    }
+
+    while (( $# > 0 )); do
+        case "$1" in
+            -s) shift; sel="$1" ;;
+            -f|-family)
+                shift; opts+=" -f $1" ;;
+            -l|-level)
+                shift; level="$1" ;;
+            -*) opts+=" $1" ;;
+            *)  break ;;
+        esac; shift
+    done
+
+    case ${sel} in
+        macaddr|props) level="link" ;;
+        proto|metric|-)
+                       level="route" ;;
+        ipaddr|mask|*) level="addr" ;;
+    esac
+
+
+    case ${level} in
+        route)
+            while read line; do
+                local default=false
+                narg="default" warg="via dev proto scope metric" propset ${line}
+
+                case ${sel} in
+                    -) ${default} && echo ${dev} || continue ;;
+                    *) echo ${!sel} ;;
+                esac
+            done < <(ip ${opts} ${level} show) ;;
+        *)
+            for intf in $@; do
+                read intf state addrs < <(ip ${opts} ${level} show ${intf})
+                case ${level} in
+                    addr)
+                        for addr in ${addrs}; do
+                            IFS=$'/' read ipaddr mask <<< "${addr}"
+                            echo ${!sel}
+                        done ;;
+                    link)
+                        read macaddr props <<< "${addrs}"
+                        read props < <(IFS=$',' explode $(awk -F '[><]' '{ print $2 }' <<< "${props}"))
+                        echo ${!sel} ;;
+                    *)  return 1 ;;
+                esac
+            done ;;
+    esac
+}
+
+while (( $# > 0 )); do
+    case "$1" in
+        -4|-6) af="$1" ;;
+        -off)  enabled=false ;;
+        *)  break ;;
+    esac; shift
+done
+
+for e in $@; do
+    IFS=$'.' read sintf dintf <<< "$e"
+
+    if ${enabled}; then
+        ip addr add $(ifaddr ${af} -s ipaddr "${sintf}") dev "${dintf}"
+        ip link set dev "${dintf}" up
+        ip link set "${sintf}" promisc on
+        parprouted "${dintf}" "${sintf}"
+    else
+        ip link set "${sintf}" promisc off
+        ip link set dev "${dintf}" down
+        ip addr del $(ifaddr ${af} -s ipaddr "${dintf}") dev "${dintf}"
+    fi
+done
